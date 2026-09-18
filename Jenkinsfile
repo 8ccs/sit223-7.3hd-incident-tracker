@@ -128,12 +128,35 @@ pipeline {
             when { expression { !params.ROLLBACK_PRODUCTION } }
             steps {
                 powershell '''
+                    # Clean report location for THIS build every time. A
+                    # stale reports\\quality left over from an earlier build
+                    # (Jenkins reuses the same workspace across builds) must
+                    # never be readable by the gate below if a tool in this
+                    # run fails before writing its own output.
+                    Remove-Item -Recurse -Force reports\\quality -ErrorAction SilentlyContinue
                     New-Item -ItemType Directory -Force -Path reports\\quality | Out-Null
 
                     & "$env:VENV\\Scripts\\flake8.exe" app --format=default | Out-File reports\\quality\\flake8.txt -Encoding utf8
-                    $global:LASTEXITCODE = 0
+                    $flake8Exit = $LASTEXITCODE
+                    # flake8: 0 = no issues, 1 = issues found -- both are a
+                    # normal completed run. Anything else means flake8 itself
+                    # failed to execute, which must stop this stage now.
+                    if ($flake8Exit -gt 1) {
+                        Write-Host "flake8 failed to execute correctly (exit code $flake8Exit)"
+                        exit $flake8Exit
+                    }
 
                     & "$env:VENV\\Scripts\\pylint.exe" app --rcfile=.pylintrc | Out-File reports\\quality\\pylint.txt -Encoding utf8
+                    # pylint's exit code is a BITMASK of finding categories
+                    # (fatal/error/warning/refactor/convention/usage-error),
+                    # not a simple 0 = clean / 1 = crash split -- a nonzero
+                    # code is completely normal for a real run with
+                    # findings, so it is deliberately not gated on here.
+                    # scripts\\quality_gate.py's own pylint-score parsing
+                    # already fails safely (falls back to a guaranteed-
+                    # failing "0.0") if pylint did not produce its usual
+                    # "rated at" summary line at all, which is what an
+                    # actual crash looks like.
                     $global:LASTEXITCODE = 0
                     & "$env:VENV\\Scripts\\pylint.exe" app --rcfile=.pylintrc --output-format=json | Out-File reports\\quality\\pylint.json -Encoding utf8
                     $global:LASTEXITCODE = 0
@@ -143,9 +166,20 @@ pipeline {
                     Set-Content -Path reports\\quality\\pylint-score.txt -Value $score -NoNewline
 
                     & "$env:VENV\\Scripts\\radon.exe" cc app -s -j | Out-File reports\\quality\\radon-cc.json -Encoding utf8
-                    $global:LASTEXITCODE = 0
+                    $radonCcExit = $LASTEXITCODE
+                    # radon has no "findings" exit-code convention like
+                    # bandit/flake8 -- 0 is a normal run and anything else is
+                    # a genuine error worth stopping on immediately.
+                    if ($radonCcExit -ne 0) {
+                        Write-Host "radon cc failed to execute correctly (exit code $radonCcExit)"
+                        exit $radonCcExit
+                    }
                     & "$env:VENV\\Scripts\\radon.exe" mi app -s | Out-File reports\\quality\\radon-mi.txt -Encoding utf8
-                    $global:LASTEXITCODE = 0
+                    $radonMiExit = $LASTEXITCODE
+                    if ($radonMiExit -ne 0) {
+                        Write-Host "radon mi failed to execute correctly (exit code $radonMiExit)"
+                        exit $radonMiExit
+                    }
 
                     & "$env:VENV\\Scripts\\python.exe" scripts\\quality_gate.py reports\\quality
                     exit $LASTEXITCODE
@@ -167,17 +201,48 @@ pipeline {
             when { expression { !params.ROLLBACK_PRODUCTION } }
             steps {
                 powershell '''
+                    # Clean report location for THIS build every time -- see
+                    # the same comment in the Code Quality stage above.
+                    Remove-Item -Recurse -Force reports\\security -ErrorAction SilentlyContinue
                     New-Item -ItemType Directory -Force -Path reports\\security | Out-Null
 
                     & "$env:VENV\\Scripts\\bandit.exe" -r app -f json -o reports\\security\\bandit.json
-                    $global:LASTEXITCODE = 0
+                    $banditJsonExit = $LASTEXITCODE
                     & "$env:VENV\\Scripts\\bandit.exe" -r app -f txt -o reports\\security\\bandit.txt
-                    $global:LASTEXITCODE = 0
+                    $banditTxtExit = $LASTEXITCODE
+                    # Bandit's own convention: 0 = no issues found, 1 =
+                    # issues found at/above the configured threshold -- both
+                    # are a normal completed scan; scripts\\security_gate.py
+                    # decides pass/fail from the JSON content itself. Any
+                    # OTHER exit code means bandit failed to run at all
+                    # (crash, bad args, plugin error), which must fail this
+                    # stage immediately, before even asking the gate --
+                    # otherwise a crashed scanner with a stale or empty
+                    # report on disk could look identical to a clean scan.
+                    if ($banditJsonExit -gt 1) {
+                        Write-Host "bandit (JSON output) failed to execute correctly (exit code $banditJsonExit)"
+                        exit $banditJsonExit
+                    }
+                    if ($banditTxtExit -gt 1) {
+                        Write-Host "bandit (text output) failed to execute correctly (exit code $banditTxtExit)"
+                        exit $banditTxtExit
+                    }
 
                     & "$env:VENV\\Scripts\\pip-audit.exe" -r requirements.txt -f json -o reports\\security\\pip-audit.json
-                    $global:LASTEXITCODE = 0
+                    $pipAuditJsonExit = $LASTEXITCODE
                     & "$env:VENV\\Scripts\\pip-audit.exe" -r requirements.txt -f columns | Out-File reports\\security\\pip-audit.txt -Encoding utf8
-                    $global:LASTEXITCODE = 0
+                    $pipAuditTxtExit = $LASTEXITCODE
+                    # Same convention for pip-audit: 0 = clean, 1 =
+                    # vulnerabilities found -- both normal; anything else is
+                    # a genuine tool failure.
+                    if ($pipAuditJsonExit -gt 1) {
+                        Write-Host "pip-audit (JSON output) failed to execute correctly (exit code $pipAuditJsonExit)"
+                        exit $pipAuditJsonExit
+                    }
+                    if ($pipAuditTxtExit -gt 1) {
+                        Write-Host "pip-audit (text output) failed to execute correctly (exit code $pipAuditTxtExit)"
+                        exit $pipAuditTxtExit
+                    }
 
                     & "$env:VENV\\Scripts\\python.exe" scripts\\security_gate.py reports\\security
                     exit $LASTEXITCODE

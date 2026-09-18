@@ -23,11 +23,11 @@ PYLINT_MIN_SCORE = 8.0
 RADON_MAX_RANK = "C"  # A (best) .. F (worst); fail anything worse than C
 RANK_ORDER = ["A", "B", "C", "D", "E", "F"]
 
-REPORTS_DIR = Path(sys.argv[1]) if len(sys.argv) > 1 else Path("reports/quality")
+DEFAULT_REPORTS_DIR = Path("reports/quality")
 
 
-def check_pylint() -> tuple[bool, str]:
-    score_file = REPORTS_DIR / "pylint-score.txt"
+def check_pylint(reports_dir: Path) -> tuple[bool, str]:
+    score_file = reports_dir / "pylint-score.txt"
     if not score_file.exists():
         return False, "pylint-score.txt not found; did the pylint step run?"
     try:
@@ -38,16 +38,32 @@ def check_pylint() -> tuple[bool, str]:
     return passed, f"pylint score {score:.2f}/10 (threshold {PYLINT_MIN_SCORE})"
 
 
-def check_radon() -> tuple[bool, str]:
-    cc_file = REPORTS_DIR / "radon-cc.json"
+def check_radon(reports_dir: Path) -> tuple[bool, str]:
+    cc_file = reports_dir / "radon-cc.json"
     if not cc_file.exists():
         return False, "radon-cc.json not found; did the radon step run?"
-    # PowerShell 5.1's "Out-File -Encoding utf8" (used in the Jenkinsfile)
-    # writes a UTF-8 byte-order mark, which json.loads() cannot parse
-    # ("Expecting value: line 1 column 1") unless it is stripped first.
-    # utf-8-sig strips it if present and behaves like plain utf-8 if not,
-    # so this is safe regardless of which tool produced the file.
-    data = json.loads(cc_file.read_text(encoding="utf-8-sig"))
+    text = cc_file.read_text(encoding="utf-8-sig")
+    if not text.strip():
+        return False, "radon-cc.json is empty; the scan did not produce a report"
+    try:
+        # PowerShell 5.1's "Out-File -Encoding utf8" (used in the
+        # Jenkinsfile) writes a UTF-8 byte-order mark, which json.loads()
+        # cannot parse ("Expecting value: line 1 column 1") unless it is
+        # stripped first. utf-8-sig strips it if present and behaves like
+        # plain utf-8 if not, so this is safe regardless of which tool
+        # produced the file.
+        data = json.loads(text)
+    except json.JSONDecodeError as exc:
+        return False, f"radon-cc.json is not valid JSON ({exc}); the scan did not complete cleanly"
+    if not isinstance(data, dict):
+        return False, "radon-cc.json has an unexpected top-level structure; the scan did not complete cleanly"
+    if not data:
+        # An empty {} means radon analysed zero files -- e.g. it was
+        # pointed at the wrong path, or crashed before writing real
+        # output. "no files means no complexity problems" would be a
+        # false PASS for a scan that never actually ran, the same class
+        # of bug fixed in scripts/security_gate.py for Bandit/pip-audit.
+        return False, "radon reported 0 analysed files; treating this as a failed/incomplete scan, not a clean one"
     worst_rank = "A"
     worst_item = None
     for _file, blocks in data.items():
@@ -65,7 +81,8 @@ def check_radon() -> tuple[bool, str]:
 
 
 def main() -> int:
-    results = [check_pylint(), check_radon()]
+    reports_dir = Path(sys.argv[1]) if len(sys.argv) > 1 else DEFAULT_REPORTS_DIR
+    results = [check_pylint(reports_dir), check_radon(reports_dir)]
     ok = True
     for passed, message in results:
         prefix = "PASS" if passed else "FAIL"
