@@ -35,6 +35,41 @@ installed later, the Dockerfile-equivalent step would just replace
 `scripts/package_artifact.ps1`; nothing else in the pipeline shape would
 need to change.
 
+### Why the deployed app is started via WMI, not Start-Process
+
+Two real, measured problems on this Jenkins/Windows combination shaped
+`scripts/deploy.ps1`, in order:
+
+1. **Redirecting any output stream hung a real build.** .NET's
+   `Process.Start` sets `bInheritHandles=TRUE` whenever any standard
+   stream is redirected, which inherits *every* inheritable handle open
+   in the caller -- not just the redirected ones. When the caller is
+   itself piped (a Jenkins pipeline step, or Python's
+   `subprocess.run(capture_output=True)`), the long-lived server keeps an
+   inherited copy of the caller's own output pipe open forever, so the
+   caller waits forever for end-of-pipe. This hung Jenkins builds twice
+   (2 streams redirected, then all 3 including stdin) before the fix:
+   redirect nothing at all. The trade-off is that `waitress`'s own
+   request/error log is not captured to a file; `/health`, the smoke
+   tests, and Prometheus `/metrics` are the evidence instead.
+2. **Jenkins killed the deployed process minutes -- or even seconds --
+   after the build finished.** Measured directly: production was gone
+   ~17-30s after "Finished: SUCCESS", with nothing in the console log
+   explaining why. Setting `BUILD_ID=dontKillMe` (Jenkins' own documented
+   exemption for its classic env-var-checking ProcessTreeKiller) made no
+   difference, which points at a Windows Job Object instead: everything
+   still assigned to the build's job gets killed when the job handle
+   closes, regardless of environment variables. The fix: launch via
+   `Win32_Process.Create` (WMI), which goes through the WMI provider host
+   (`WmiPrvSE.exe`) -- a separate process tree with no job or handle
+   relationship to Jenkins at all. Verified across three separate builds
+   that the app is still running and healthy minutes after the pipeline
+   finished.
+
+Both fixes and their evidence are in the comment above the
+`Win32_Process.Create` call in `scripts/deploy.ps1`, and in the git
+history (`git log --oneline`) for anyone who wants the blow-by-blow.
+
 ## 2. Repository layout
 
 ```
