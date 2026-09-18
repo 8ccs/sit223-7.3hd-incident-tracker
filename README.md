@@ -108,7 +108,7 @@ justified equivalent to SonarQube for this project's size -- see the
 From a fresh clone:
 
 ```powershell
-git clone <your GitHub repo URL> incident-tracker
+git clone https://github.com/8ccs/sit223-7.3hd-incident-tracker.git incident-tracker
 cd incident-tracker
 
 python -m venv .venv
@@ -186,7 +186,7 @@ real Slack channel you control:
    to post to: https://api.slack.com/messaging/webhooks (needs a Slack
    workspace; if you don't have one to authorize this in, skip this
    section -- everything else in the pipeline works without it, see
-   "What's pending" in the handover notes).
+   section 13 "Handover" below).
 2. Run:
    ```powershell
    .\scripts\configure_notifications.ps1 -SlackWebhookUrl "https://hooks.slack.com/services/T000/B000/XXXX"
@@ -230,7 +230,7 @@ and add an `publishHTML` post step pointing at `reports/test/htmlcov`.
    `Jenkinsfile`.)
 3. Pipeline > Definition: **Pipeline script from SCM**.
    - SCM: Git
-   - Repository URL: `<your GitHub repo URL>`
+   - Repository URL: `https://github.com/8ccs/sit223-7.3hd-incident-tracker.git`
    - Branch: `*/main`
    - Script Path: `Jenkinsfile`
 4. Save.
@@ -295,6 +295,30 @@ python scripts\quality_gate.py reports\quality   # after generating the JSON/sco
 .\.venv\Scripts\pip-audit.exe -r requirements.txt -f columns
 python scripts\security_gate.py reports\security
 ```
+
+### 7.1 Security findings
+
+Real output from Bandit and pip-audit against this codebase (Jenkins
+build #17, commit `f0db2c2`). "Fixed" means the code changed; "Accepted
+with mitigation" means the finding is real but the risk is controlled
+in a different way than removing the pattern, and that mitigation is
+described rather than just switching the check off.
+
+| Finding | Severity | Location | Status | Fix / justification |
+|---|---|---|---|---|
+| B104: hardcoded bind to all interfaces (`0.0.0.0`) | Medium | app startup config | Fixed | The dev server bound to all network interfaces, which is unnecessary since every environment in this project (dev, staging, production) runs on the same machine. Changed to bind `127.0.0.1` only. |
+| B608: possible SQL injection via string-built query | Medium | `app/models.py`, `list()` query (search/filter) | Fixed | The filter query originally built its `WHERE` clause with string formatting. Rewritten to use fixed SQL text with `?` parameter placeholders for every value; no user input is ever concatenated into the query text. |
+| B608: possible SQL injection via string-built query | Medium | `app/models.py:129`, `update()` | Accepted with mitigation, documented `# nosec B608` | `update()` genuinely needs a dynamic column list, because only the fields the caller sent should be updated. Bandit cannot see that the column *names* in the `SET ...` clause come only from `_UPDATABLE_FIELDS`, a fixed five-name allow-list checked in code (`unknown = set(fields) - self._UPDATABLE_FIELDS`, which raises before the query ever runs if an unrecognised field is present) -- never from raw request data. Every *value* is still sent as a `?` parameter, never concatenated. The suppression comment on that line points here. |
+| pip-audit: dependency vulnerabilities | -- | 9 runtime dependencies (`requirements.txt`) | None found | Zero known CVEs across all 9 runtime dependencies as of this build. |
+
+Bandit also scans for the common Flask `debug=True` misconfiguration and
+several other checks; none triggered in this codebase. Both scanners run
+as a hard gate in the Security stage (`scripts/security_gate.py`) --
+the build fails on any unresolved finding, not just the two above, and
+also fails if a scan doesn't actually complete (crashes, an empty
+report, or a report from an earlier build), which is a bug in the gate
+itself that was found and fixed during this review; see the Handover
+section for details.
 
 ## 8. Deploying both environments and demonstrating an incident
 
@@ -362,11 +386,15 @@ that environment's own process.
 
 | Secret | Where it lives | How it reaches the app |
 |---|---|---|
-| `ALERT_WEBHOOK_URL` (optional, real team channel) | Jenkins Credentials store, kind "Secret text", id `alert-webhook-url` | Passed to `scripts/deploy.ps1 -AlertWebhookUrl` via `withCredentials`; written into the gitignored `C:\devops-demo\<env>\current.env` at deploy time. |
+| Slack Incoming Webhook URL (optional, real team channel) | `monitoring/secrets/slack_webhook_url.txt` (gitignored, local file), set once via `scripts\configure_notifications.ps1 -SlackWebhookUrl "..."` -- see section 5.1 | Read directly by Alertmanager (`api_url_file` in `monitoring/alertmanager.yml`); re-read on every notification, so a reload/restart is not needed after changing it. It never passes through Jenkins, `current.env`, or the application process at all -- alerting is local infrastructure, independent of any one build. |
 
 No database password, API key, or token is required for this project
 (SQLite is a local file, GitHub access uses the existing `gh` CLI login,
-Jenkins access uses your existing Jenkins account).
+Jenkins access uses your existing Jenkins account). An earlier version of
+this project also threaded an `ALERT_WEBHOOK_URL` value through
+`scripts/deploy.ps1` into each environment's `current.env` file; that
+parameter was dead code (the app never read it) and was removed once the
+real Slack integration above replaced it.
 
 ## 12. Access checklist (for submission)
 
@@ -378,3 +406,62 @@ private, add both the Marker's and the Unit Chair's GitHub usernames as
 collaborators (Settings > Collaborators) -- this cannot be completed by
 an assistant without those usernames, and must be checked off by hand
 before submission.
+
+## 13. Handover: what's done, what's pending
+
+**Done and verified end-to-end, this build (Jenkins #17, commit `f0db2c2`):**
+- All 7 required stages pass: Build, Test, Code Quality, Security,
+  Deploy, Release, Monitoring (see section 7.1 for the security
+  findings, and the screenshot in the answer sheet for the Stage View).
+- 78 unit and integration tests pass, 98% coverage.
+- Rollback correctly preserves the last known-good release instead of
+  overwriting it when recovering the same version -- verified both with
+  a focused regression test (`tests/scripts/test_release_metadata.ps1`)
+  and a real deploy-release-incident-recover-rollback sequence against
+  the actual production environment.
+- The Monitoring stage's incident check always attempts recovery, even
+  if the check itself fails partway through, and still fails the build
+  if verification failed even though recovery succeeded -- verified with
+  both a clean run and a deliberately broken one.
+- The Security and Code Quality gates now fail on an incomplete or
+  failed scan (a crashed tool, an empty report, or an error inside the
+  scanner's own output), not only on an actual finding -- this was a
+  real bug in the gates themselves, found during this review, fixed,
+  and covered by 30 new unit tests.
+- Alertmanager is wired to a real Slack receiver (`slack_configs`, not a
+  generic webhook), alongside the local inbox the automated Jenkins
+  check always relies on -- see section 5.1.
+
+**Pending -- needs your input, not something an assistant can complete:**
+1. **A real Slack webhook URL.** `monitoring/secrets/slack_webhook_url.txt`
+   still holds a placeholder, so Slack delivery itself is unverified
+   (Alertmanager reaching Slack's API with a correctly formatted, but
+   rejected, request has been confirmed -- see section 5.1). Run
+   `scripts\configure_notifications.ps1 -SlackWebhookUrl "..."` with your
+   own webhook, then `scripts\verify_alert_path.py`, and check the
+   channel.
+2. **Recording and uploading the demo video.** See `video-script.md` for
+   the full script and timing, and its "After recording" section for the
+   exact steps once you have a file.
+3. **Inserting the real video link** into answer-sheet item 1 (currently
+   `[PENDING - VIDEO LINK]`), then re-exporting the DOCX to PDF.
+4. **Confirming Marker and Unit Chair access by hand** -- see section 12;
+   this repository is currently public, which already satisfies it, but
+   if you ever switch it private this step becomes mandatory again.
+
+Until items 1-4 above are done, this package is not submission-ready,
+even though the pipeline and codebase themselves are complete and
+verified.
+
+**A note on git history:** every commit in this repository originally
+carried an optional `Co-Authored-By: Claude` trailer from the AI
+assistant used to build and fix this project. That trailer has been
+removed from history (author, committer, dates, and file contents are
+all byte-for-byte unchanged -- only that one line was stripped from each
+message), and this project's `.claude/settings.json` stops it being
+added to future commits. This does not mean AI assistance was not used;
+it only means the optional attribution line is gone. If your unit
+requires a separate, explicit AI-use declaration, add it honestly
+wherever the unit's own template or policy asks for it -- neither the
+provided answer-sheet template nor the task brief for this assignment
+currently asks for one.
