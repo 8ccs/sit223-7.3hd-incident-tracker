@@ -32,6 +32,8 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+. (Join-Path $PSScriptRoot "lib\ReleaseMetadata.ps1")
+
 $envRoot = Join-Path $Root $Environment
 $releasesDir = Join-Path $envRoot "releases"
 $currentLink = Join-Path $envRoot "current"
@@ -81,13 +83,6 @@ try {
     $pip = Join-Path $venvDir "Scripts\pip.exe"
     $pythonExe = Join-Path $venvDir "Scripts\python.exe"
     & $pip install --quiet --disable-pip-version-check -r (Join-Path $versionDir "requirements.txt")
-
-    # --- record previous version for rollback, before we overwrite "current" ---
-    $versionFile = Join-Path $envRoot "current_version.txt"
-    if (Test-Path $versionFile) {
-        Copy-Item $versionFile (Join-Path $envRoot "previous_version.txt") -Force
-    }
-    Set-Content -Path $versionFile -Value $zipName -Encoding utf8
 
     # --- environment config (non-secret values checked in as .example, ---
     # --- secret-like value injected from Jenkins credential at deploy time) ---
@@ -216,8 +211,20 @@ ALERT_WEBHOOK_URL=$AlertWebhookUrl
         } catch { }
     }
     if (-not $ready) {
-        throw "Deployment to $Environment failed readiness check at $healthUrl after 30s (pid $newPid). Check whether the process is still running (Get-Process -Id $newPid) and whether anything else is bound to port $port."
+        # Deliberately do NOT touch current_version.txt / previous_version.txt
+        # here: a failed deployment must never overwrite the last known-good
+        # release record. Whatever was there before this attempt is still
+        # accurate -- scripts/rollback.ps1 can still be used against it.
+        throw "Deployment to $Environment failed readiness check at $healthUrl after 30s (pid $newPid). Check whether the process is still running (Get-Process -Id $newPid) and whether anything else is bound to port $port. current_version.txt / previous_version.txt were left untouched."
     }
+
+    # --- record release metadata, now that health is confirmed ---
+    # See scripts/lib/ReleaseMetadata.ps1 for why this only happens here,
+    # after readiness, and only rotates previous_version.txt when the
+    # version actually changed. tests/test_release_metadata.ps1 tests
+    # this decision directly.
+    Update-ReleaseMetadata -EnvRoot $envRoot -NewZipName $zipName
+
     Write-Host "$Environment is ready: $healthUrl -> ok (pid $newPid, version $($manifest.full_version))"
 } finally {
     Remove-Item $lockFile -Force -ErrorAction SilentlyContinue
