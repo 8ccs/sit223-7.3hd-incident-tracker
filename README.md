@@ -299,7 +299,7 @@ python scripts\security_gate.py reports\security
 ### 7.1 Security findings
 
 Real output from Bandit and pip-audit against this codebase (Jenkins
-build #17, commit `f0db2c2`). "Fixed" means the code changed; "Accepted
+build #19, commit `4323a72`). "Fixed" means the code changed; "Accepted
 with mitigation" means the finding is real but the risk is controlled
 in a different way than removing the pattern, and that mitigation is
 described rather than just switching the check off.
@@ -409,7 +409,7 @@ before submission.
 
 ## 13. Handover: what's done, what's pending
 
-**Done and verified end-to-end, this build (Jenkins #17, commit `f0db2c2`):**
+**Done and verified end-to-end, this build (Jenkins #19, commit `4323a72`):**
 - All 7 required stages pass: Build, Test, Code Quality, Security,
   Deploy, Release, Monitoring (see section 7.1 for the security
   findings, and the screenshot in the answer sheet for the Stage View).
