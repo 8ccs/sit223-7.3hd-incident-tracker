@@ -1,0 +1,24 @@
+# Alertmanager configuration.
+# Reference: https://prometheus.io/docs/alerting/latest/configuration/
+#
+# Notification destination: by default this points at the local webhook
+# inbox (monitoring/webhook_receiver.py) so the alert path can be
+# demonstrated fully offline. To use a real team channel instead, replace
+# the webhook_configs URL below with a real Slack/Discord/Teams incoming
+# webhook URL (kept out of source control -- see README "Credential
+# setup"). This substitution does not require any other pipeline change.
+global:
+  resolve_timeout: 30s
+
+route:
+  receiver: "local-webhook-inbox"
+  group_by: ["alertname"]
+  group_wait: 5s
+  group_interval: 10s
+  repeat_interval: 1h
+
+receivers:
+  - name: "local-webhook-inbox"
+    webhook_configs:
+      - url: "http://localhost:9099/webhook"
+        send_resolved: true
