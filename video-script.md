@@ -320,16 +320,19 @@ quality (rubric: "Report Quality" / "Pipeline Completeness").
 **Show:** Your face, or the `app/metrics.py` file briefly.
 
 **Say:**
-"One real problem I hit while building this: my automated monitoring
-check kept hanging after a successful recovery. It turned out that when
-PowerShell starts the production server as a background process, that
-process can inherit and keep open file handles from the script that
-launched it, on Windows -- so Python's subprocess call was waiting
-forever for a pipe to close that never would. I fixed it by writing that
-output to files instead of pipes, and adding an explicit timeout as a
-safety net. That's the kind of real integration issue you only find by
-actually running the full pipeline end to end, not just writing it.
-Thanks for watching."
+"One real problem I hit while building this: production kept
+disappearing a few seconds after Jenkins said the build succeeded. The
+app would be live, the pipeline would go green, and then it was just...
+gone. It turned out Jenkins was killing every process a build leaves
+running once that build finishes, using something called a Windows Job
+Object -- which makes sense for a normal build, but breaks the entire
+point of a Release stage, since its job is to leave something running.
+I fixed it by launching the app through Windows Management
+Instrumentation instead of the normal way, which starts it completely
+outside Jenkins' process tree, so it survives. That's the kind of real
+integration bug you only find by actually running the full pipeline
+end to end and checking afterwards, not just watching it print
+'Finished: SUCCESS'. Thanks for watching."
 
 **Demonstrates:** Reflective technical insight (rubric Top HD: "deep
 insight and fluent narration").
