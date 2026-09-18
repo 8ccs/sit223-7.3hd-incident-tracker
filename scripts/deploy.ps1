@@ -114,6 +114,15 @@ ALERT_WEBHOOK_URL=$AlertWebhookUrl
     foreach ($conn in $existing) {
         Stop-Process -Id $conn.OwningProcess -Force -ErrorAction SilentlyContinue
     }
+    Start-Sleep -Milliseconds 500
+    $stillListening = Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue
+    if ($stillListening) {
+        # Most likely cause: the previous process was started by Jenkins
+        # (LocalSystem) and this caller does not have permission to stop a
+        # SYSTEM-owned process. An elevated ("Run as Administrator")
+        # window can; Jenkins itself always can, since it IS SYSTEM.
+        throw "Port $port is still in use by pid $($stillListening[0].OwningProcess) and it could not be stopped. If that process was deployed by Jenkins, it runs as SYSTEM -- re-run this from an elevated PowerShell window (Run as Administrator), or redeploy via Jenkins itself."
+    }
 
     # --- start new process ---
     $env:APP_ENV = $Environment
@@ -130,12 +139,31 @@ ALERT_WEBHOOK_URL=$AlertWebhookUrl
     # expose the app on every network interface (see app/app.py B104 note).
     $arguments = @("--listen=127.0.0.1:$port", "--call", "app.app:create_app")
 
+    # All three standard streams are explicitly redirected to files (stdin
+    # from a permanent empty file -- Start-Process requires an existing
+    # file on a filesystem provider, so the "\\.\NUL" device path is
+    # rejected). Without this, the new process can inherit the CALLER's
+    # own stdout/stderr handles on Windows -- when the caller is itself a
+    # piped process (a Jenkins pipeline step, or Python's subprocess.run
+    # with captured output), that caller then waits forever for
+    # end-of-pipe, which never comes because this long-lived detached
+    # server keeps its inherited copy of the handle open. This hung both
+    # an earlier Jenkins build and scripts/verify_alert_path.py before
+    # the redirection was added here and (for the Python side) in that
+    # script.
+    $emptyStdin = Join-Path $Root "empty.stdin"
+    if (-not (Test-Path $emptyStdin)) {
+        New-Item -ItemType Directory -Path $Root -Force | Out-Null
+        New-Item -ItemType File -Path $emptyStdin -Force | Out-Null
+    }
+
     Push-Location $versionDir
     try {
         $proc = Start-Process -FilePath $waitress -ArgumentList $arguments `
             -WorkingDirectory $versionDir -PassThru -WindowStyle Hidden `
-            -RedirectStandardOutput $stdout -RedirectStandardError $stderr
-        Set-Content -Path $pidFile -Value $proc.Id -Encoding utf8
+            -RedirectStandardOutput $stdout -RedirectStandardError $stderr `
+            -RedirectStandardInput $emptyStdin
+        Set-Content -Path $pidFile -Value $proc.Id -Encoding ascii
     } finally {
         Pop-Location
     }
