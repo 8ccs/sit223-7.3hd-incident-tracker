@@ -23,6 +23,11 @@ data/
 # Monitoring runtime output
 monitoring/alerts_received.log
 
+# Real notification-channel secrets (never commit; see
+# monitoring/secrets/slack_webhook_url.example for the safe placeholder)
+monitoring/secrets/*
+!monitoring/secrets/*.example
+
 # OS/editor
 .DS_Store
 Thumbs.db

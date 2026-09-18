@@ -19,15 +19,15 @@
   zip is used for both staging and production releases: Release never
   rebuilds the app.
 
-.PARAMETER AlertWebhookUrl
-  Optional. Passed in from a Jenkins credential (secret text), never
-  hardcoded. Falls back to the local webhook inbox used for development.
+  Notification destinations (the local alert inbox, and a real Slack
+  channel once configured) are NOT set here -- they belong to the
+  monitoring stack, which runs continuously and independently of any one
+  deploy. See monitoring/alertmanager.yml and scripts/configure_notifications.ps1.
 #>
 param(
     [Parameter(Mandatory = $true)][ValidateSet("staging", "production")][string]$Environment,
     [Parameter(Mandatory = $true)][string]$ZipPath,
-    [string]$Root = "C:\devops-demo",
-    [string]$AlertWebhookUrl = "http://localhost:9099/webhook"
+    [string]$Root = "C:\devops-demo"
 )
 
 $ErrorActionPreference = "Stop"
@@ -84,8 +84,9 @@ try {
     $pythonExe = Join-Path $venvDir "Scripts\python.exe"
     & $pip install --quiet --disable-pip-version-check -r (Join-Path $versionDir "requirements.txt")
 
-    # --- environment config (non-secret values checked in as .example, ---
-    # --- secret-like value injected from Jenkins credential at deploy time) ---
+    # --- environment config (all non-secret; this app has no secrets of ---
+    # --- its own -- notification credentials live in the monitoring ---
+    # --- stack's own config, not here; see monitoring/alertmanager.yml) ---
     $manifest = Get-Content (Join-Path $versionDir "version.json") | ConvertFrom-Json
     $envFile = Join-Path $envRoot "current.env"
     @"
@@ -94,7 +95,6 @@ PORT=$port
 DB_PATH=$dataDir\incidents.db
 APP_VERSION=$($manifest.full_version)
 GIT_COMMIT=$($manifest.git_commit)
-ALERT_WEBHOOK_URL=$AlertWebhookUrl
 "@ | Set-Content -Path $envFile -Encoding utf8
 
     # --- stop previous process for this environment, if any ---

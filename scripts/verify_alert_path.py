@@ -304,9 +304,18 @@ def main() -> int:  # noqa: PLR0915 - linear step-by-step script reads clearer f
 
     # --- final verdict: report both failures if both happened, and never ---
     # --- let a successful cleanup paper over a real verification failure ---
+    # `incident_introduced` matters here too: if simulate_incident.ps1
+    # itself failed (e.g. permission denied stopping a SYSTEM-owned
+    # process), the app was never actually broken, so there is nothing
+    # to recover from and recovery is correctly never attempted --
+    # that must not be reported as "recovery succeeded".
     if original_error is not None and recovery_error is not None:
         timeline["result"] = "FAILED"
         log(f"RESULT: FAILED -- original error: {original_error}; recovery ALSO failed: {recovery_error}")
+    elif original_error is not None and not incident_introduced:
+        timeline["result"] = "FAILED"
+        log(f"RESULT: FAILED -- {original_error}. The incident was never actually introduced, "
+            "so no recovery was needed or attempted; production was not touched.")
     elif original_error is not None:
         timeline["result"] = "FAILED"
         log(f"RESULT: FAILED (fault-injection verification) -- {original_error}. "
@@ -317,6 +326,7 @@ def main() -> int:  # noqa: PLR0915 - linear step-by-step script reads clearer f
     else:
         timeline["result"] = "PASSED"
 
+    timeline["incident_introduced"] = incident_introduced
     REPORT_PATH.parent.mkdir(parents=True, exist_ok=True)
     REPORT_PATH.write_text(json.dumps(timeline, indent=2), encoding="utf-8")
 
