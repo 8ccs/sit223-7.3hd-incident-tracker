@@ -46,6 +46,12 @@ pipeline {
         APP_BASE_VERSION = '1.0.0'
         VENV             = "${WORKSPACE}\\.venv"
         ARTIFACT_STORE   = 'C:\\devops-demo\\artifacts'
+        // Jenkins runs as the LocalSystem service account, whose PATH does
+        // not include the user-level Python install (Python was installed
+        // per-user, not machine-wide) -- so "python" alone is not found
+        // even though it works in an interactive shell. Every bootstrap
+        // step below uses this explicit path instead of relying on PATH.
+        SYSTEM_PYTHON    = 'C:\\Users\\auwal\\AppData\\Local\\Programs\\Python\\Python311\\python.exe'
     }
 
     stages {
@@ -69,7 +75,7 @@ pipeline {
                 powershell '''
                     $ErrorActionPreference = "Stop"
                     if (-not (Test-Path $env:VENV)) {
-                        python -m venv $env:VENV
+                        & $env:SYSTEM_PYTHON -m venv $env:VENV
                     }
                     & "$env:VENV\\Scripts\\pip.exe" install --quiet --disable-pip-version-check -r requirements-dev.txt
 

@@ -68,7 +68,15 @@ try {
     $venvDir = Join-Path $envRoot "venv"
     if (-not (Test-Path $venvDir)) {
         Write-Host "Creating venv for $Environment"
-        python -m venv $venvDir
+        # "python" is not on PATH for every caller (notably the Jenkins
+        # LocalSystem service account, which has no user-level PATH
+        # entries), so fall back to the known per-user install if the
+        # bare command can't be resolved.
+        $systemPython = (Get-Command python -ErrorAction SilentlyContinue).Source
+        if (-not $systemPython) {
+            $systemPython = "C:\Users\auwal\AppData\Local\Programs\Python\Python311\python.exe"
+        }
+        & $systemPython -m venv $venvDir
     }
     $pip = Join-Path $venvDir "Scripts\pip.exe"
     $pythonExe = Join-Path $venvDir "Scripts\python.exe"
