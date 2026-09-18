@@ -163,8 +163,22 @@ ALERT_WEBHOOK_URL=$AlertWebhookUrl
     # are the primary evidence for this project instead (see README
     # troubleshooting section for how to debug a failed readiness check
     # without those log files).
-    $proc = Start-Process -FilePath $waitress -ArgumentList $arguments `
-        -WorkingDirectory $versionDir -PassThru -WindowStyle Hidden
+    # Jenkins' ProcessTreeKiller kills every descendant process left over
+    # once a build finishes, on the assumption that nothing a build
+    # starts should outlive it -- which is exactly wrong for Deploy and
+    # Release, whose whole point is to leave a running server behind.
+    # Measured directly: the deployed process was gone within ~17s of
+    # "Finished: SUCCESS". Setting BUILD_ID=dontKillMe on the child's
+    # environment before launch is Jenkins' own documented exemption
+    # flag for precisely this case.
+    $previousBuildId = $env:BUILD_ID
+    $env:BUILD_ID = "dontKillMe"
+    try {
+        $proc = Start-Process -FilePath $waitress -ArgumentList $arguments `
+            -WorkingDirectory $versionDir -PassThru -WindowStyle Hidden
+    } finally {
+        $env:BUILD_ID = $previousBuildId
+    }
     $newPid = $proc.Id
     Set-Content -Path $pidFile -Value $newPid -Encoding ascii
 
