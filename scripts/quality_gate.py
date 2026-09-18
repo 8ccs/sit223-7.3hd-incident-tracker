@@ -31,7 +31,7 @@ def check_pylint() -> tuple[bool, str]:
     if not score_file.exists():
         return False, "pylint-score.txt not found; did the pylint step run?"
     try:
-        score = float(score_file.read_text().strip())
+        score = float(score_file.read_text(encoding="utf-8-sig").strip())
     except ValueError:
         return False, f"could not parse pylint score from {score_file}"
     passed = score >= PYLINT_MIN_SCORE
@@ -42,7 +42,12 @@ def check_radon() -> tuple[bool, str]:
     cc_file = REPORTS_DIR / "radon-cc.json"
     if not cc_file.exists():
         return False, "radon-cc.json not found; did the radon step run?"
-    data = json.loads(cc_file.read_text())
+    # PowerShell 5.1's "Out-File -Encoding utf8" (used in the Jenkinsfile)
+    # writes a UTF-8 byte-order mark, which json.loads() cannot parse
+    # ("Expecting value: line 1 column 1") unless it is stripped first.
+    # utf-8-sig strips it if present and behaves like plain utf-8 if not,
+    # so this is safe regardless of which tool produced the file.
+    data = json.loads(cc_file.read_text(encoding="utf-8-sig"))
     worst_rank = "A"
     worst_item = None
     for _file, blocks in data.items():

@@ -29,7 +29,7 @@ def check_bandit() -> tuple[bool, str]:
     bandit_file = REPORTS_DIR / "bandit.json"
     if not bandit_file.exists():
         return False, "bandit.json not found; did the bandit step run?"
-    data = json.loads(bandit_file.read_text())
+    data = json.loads(bandit_file.read_text(encoding="utf-8-sig"))
     results = data.get("results", [])
     blocking = [
         r for r in results
@@ -45,7 +45,7 @@ def check_pip_audit() -> tuple[bool, str]:
     audit_file = REPORTS_DIR / "pip-audit.json"
     if not audit_file.exists():
         return False, "pip-audit.json not found; did the pip-audit step run?"
-    data = json.loads(audit_file.read_text())
+    data = json.loads(audit_file.read_text(encoding="utf-8-sig"))
     dependencies = data.get("dependencies", data if isinstance(data, list) else [])
     blocking = []
     unfixable = []
