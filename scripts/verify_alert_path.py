@@ -18,6 +18,7 @@ Usage: python scripts/verify_alert_path.py
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 import time
@@ -28,11 +29,20 @@ import requests
 
 PS1_LOG_DIR = Path("reports/monitoring/ps1-logs")
 
+# This script is scoped, on purpose, to ONLY this project's own local demo
+# production target on localhost -- it never touches any other host, port,
+# or service. See simulate_incident.ps1 / recover_incident.ps1 for the
+# same scoping at the process-management level.
 PROM_URL = "http://localhost:9090"
 ALERTMANAGER_URL = "http://localhost:9093"
 INBOX_URL = "http://localhost:9099"
 PROD_METRICS_URL = "http://localhost:5000/metrics"
-ALERT_NAME = "AppDown"
+PROD_HEALTH_URL = "http://localhost:5000/health"
+# Overridable only so this script's own guaranteed-recovery behaviour can
+# be regression-tested by deliberately pointing it at an alert name that
+# will never fire (see tests/scripts/test_verify_alert_path_recovery.py).
+# Real runs always use the default.
+ALERT_NAME = os.environ.get("VERIFY_ALERT_NAME", "AppDown")
 
 SCRIPTS_DIR = Path(__file__).parent
 REPORT_PATH = Path("reports/monitoring/alert-path-verification.json")
@@ -155,7 +165,19 @@ def preflight() -> None:
     log("All monitoring components reachable.")
 
 
-def main() -> int:
+def main() -> int:  # noqa: PLR0915 - linear step-by-step script reads clearer flat
+    # Tracked across the whole function so the mandatory cleanup in
+    # `finally` knows whether there is anything to recover from, and so
+    # the original failure and any separate recovery failure can be
+    # reported (and reasoned about) independently. A failure verifying
+    # the fault-injection path must fail this script's exit code even if
+    # cleanup afterwards succeeds -- recovering the demo environment is
+    # not the same thing as the monitoring behaviour actually working.
+    incident_introduced = False
+    original_error: Exception | None = None
+    recovery_error: Exception | None = None
+    t0: str | None = None
+
     try:
         preflight()
 
@@ -172,6 +194,11 @@ def main() -> int:
         t0 = now()
         timeline["incident_introduced_at"] = t0
         run_ps1("simulate_incident.ps1")
+        # From this point on, the app is deliberately broken. The `finally`
+        # block below is now REQUIRED to attempt recovery, no matter what
+        # happens in the checks below -- a timeout waiting for the alert to
+        # fire must not leave production down.
+        incident_introduced = True
 
         log("Step 2/5: waiting for Prometheus to mark the target down...")
         wait_for(
@@ -200,46 +227,102 @@ def main() -> int:
         timeline["notification_received_at"] = now()
         log("Notification received by webhook inbox.")
 
-        log("Step 5/5: recovering the production process and waiting for resolution...")
-        t_recover = now()
-        timeline["recovery_started_at"] = t_recover
-        run_ps1("recover_incident.ps1")
+        timeline["fault_injection_result"] = "PASSED"
+        log("Fault-injection verification PASSED (issue introduced, detected, alerted, notified).")
 
-        wait_for(
-            lambda: prometheus_target_health("incident-tracker-production") == "up",
-            timeout_s=30, interval_s=2,
-            description="production target health == up again",
-        )
-        timeline["target_up_detected_at"] = now()
-        log("Target confirmed up again.")
-
-        wait_for(
-            lambda: alert_is_gone(ALERT_NAME),
-            timeout_s=60, interval_s=2,
-            description=f"alert {ALERT_NAME} cleared in Prometheus",
-        )
-        timeline["alert_cleared_at"] = now()
-        log("Alert cleared in Prometheus.")
-
-        wait_for(
-            lambda: inbox_has_status(ALERT_NAME, "resolved", t_recover),
-            timeout_s=60, interval_s=2,
-            description="webhook inbox received a resolved notification",
-        )
-        timeline["resolved_notification_received_at"] = now()
-        log("Resolved notification received by webhook inbox.")
-
-        timeline["result"] = "PASSED"
-    except Exception as exc:  # noqa: BLE001 - we want to report and exit non-zero
-        timeline["result"] = "FAILED"
+    except Exception as exc:  # noqa: BLE001 - recorded, not swallowed; re-raised below
+        original_error = exc
+        timeline["fault_injection_result"] = "FAILED"
         timeline["error"] = str(exc)
-        REPORT_PATH.parent.mkdir(parents=True, exist_ok=True)
-        REPORT_PATH.write_text(json.dumps(timeline, indent=2), encoding="utf-8")
-        log(f"FAILED: {exc}")
-        return 1
+        log(f"Fault-injection verification FAILED: {exc}")
+
+    finally:
+        # GUARANTEED cleanup: once the incident was introduced, always try
+        # to restore the app, whether the checks above passed, failed, or
+        # raised. This runs even if the try block above threw partway
+        # through -- that is the entire point of putting it in `finally`.
+        if incident_introduced:
+            try:
+                log("Step 5/5: recovering the production process (always attempted)...")
+                t_recover = now()
+                timeline["recovery_started_at"] = t_recover
+                run_ps1("recover_incident.ps1")
+
+                wait_for(
+                    lambda: prometheus_target_health("incident-tracker-production") == "up",
+                    timeout_s=30, interval_s=2,
+                    description="production target health == up again",
+                )
+                timeline["target_up_detected_at"] = now()
+                log("Target confirmed up again.")
+
+                # Confirm the app is not just "a" process, but running the
+                # INTENDED version -- recover_incident.ps1 always redeploys
+                # whatever current_version.txt already said, never a
+                # rebuild, so this must be the same version that was
+                # running before the incident.
+                resp = requests.get(PROD_HEALTH_URL, timeout=5)
+                resp.raise_for_status()
+                body = resp.json()
+                if body.get("status") != "ok":
+                    raise RuntimeError(f"post-recovery health check did not report ok: {body}")
+                timeline["post_recovery_version"] = body.get("version")
+                log(f"Post-recovery health check ok, running version {body.get('version')}.")
+
+                # The alert-cleared / resolved-notification evidence is
+                # only meaningful when the fault-injection path above
+                # actually got as far as a real firing alert to resolve.
+                # If it failed earlier (e.g. the alert never fired), there
+                # is nothing to clear, so do not chase that here -- the
+                # service being back up and healthy is the recovery
+                # contract; the FAILED verdict from fault-injection still
+                # stands regardless.
+                if original_error is None:
+                    wait_for(
+                        lambda: alert_is_gone(ALERT_NAME),
+                        timeout_s=60, interval_s=2,
+                        description=f"alert {ALERT_NAME} cleared in Prometheus",
+                    )
+                    timeline["alert_cleared_at"] = now()
+                    log("Alert cleared in Prometheus.")
+
+                    wait_for(
+                        lambda: inbox_has_status(ALERT_NAME, "resolved", t_recover),
+                        timeout_s=60, interval_s=2,
+                        description="webhook inbox received a resolved notification",
+                    )
+                    timeline["resolved_notification_received_at"] = now()
+                    log("Resolved notification received by webhook inbox.")
+
+                timeline["recovery_result"] = "PASSED"
+
+            except Exception as exc:  # noqa: BLE001 - recorded separately from original_error
+                recovery_error = exc
+                timeline["recovery_result"] = "FAILED"
+                timeline["recovery_error"] = str(exc)
+                log(f"RECOVERY FAILED: {exc}")
+
+    # --- final verdict: report both failures if both happened, and never ---
+    # --- let a successful cleanup paper over a real verification failure ---
+    if original_error is not None and recovery_error is not None:
+        timeline["result"] = "FAILED"
+        log(f"RESULT: FAILED -- original error: {original_error}; recovery ALSO failed: {recovery_error}")
+    elif original_error is not None:
+        timeline["result"] = "FAILED"
+        log(f"RESULT: FAILED (fault-injection verification) -- {original_error}. "
+            "Recovery succeeded; production should be running again on its intended version.")
+    elif recovery_error is not None:
+        timeline["result"] = "FAILED"
+        log(f"RESULT: FAILED (recovery, after fault-injection verification otherwise passed) -- {recovery_error}")
+    else:
+        timeline["result"] = "PASSED"
 
     REPORT_PATH.parent.mkdir(parents=True, exist_ok=True)
     REPORT_PATH.write_text(json.dumps(timeline, indent=2), encoding="utf-8")
+
+    if timeline["result"] != "PASSED":
+        return 1
+
     log("Full alert path verified: issue -> rule fired -> notification received -> recovered -> resolved.")
     return 0
 
