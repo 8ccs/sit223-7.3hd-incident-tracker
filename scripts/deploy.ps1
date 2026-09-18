@@ -137,49 +137,72 @@ ALERT_WEBHOOK_URL=$AlertWebhookUrl
     # expose the app on every network interface (see app/app.py B104 note).
     $arguments = @("--listen=127.0.0.1:$port", "--call", "app.app:create_app")
 
-    # Started with NO stream redirection at all -- deliberately.
+    # Started via WMI (Win32_Process.Create), NOT Start-Process, and NOT
+    # through cmd.exe. Two separate problems ruled out every other option
+    # actually tried against the real Jenkins pipeline, not just guessed:
     #
-    # .NET's Process.Start only sets bInheritHandles=TRUE on Windows when
-    # at least one standard stream is redirected; that inherits EVERY
-    # currently-inheritable handle open in the calling process, not just
-    # the redirected ones. When the caller is itself a piped/captured
-    # process (a Jenkins pipeline step, or Python's subprocess.run with
-    # captured output), the long-lived server we start here keeps an
-    # inherited copy of the CALLER's own output pipe open forever, so the
-    # caller waits forever for end-of-pipe that will never come. This is
-    # not hypothetical: it hung a real Jenkins build twice, first with
-    # 2 streams redirected, then again with all 3 (stdin included) --
-    # partial or full redirection both trigger the same inheritance
-    # behaviour. A WMI Win32_Process.Create launch was also tried, to
-    # sidestep .NET entirely, but hung too (a cmd.exe redirection shim
-    # was needed for file-based logging and that shim itself did not
-    # behave reliably when launched outside any console session).
+    # 1) .NET's Process.Start only sets bInheritHandles=TRUE when at least
+    #    one standard stream is redirected, which then inherits EVERY
+    #    inheritable handle open in the caller, not just the redirected
+    #    ones. When the caller is itself piped/captured (a Jenkins
+    #    pipeline step, or Python's subprocess.run with captured output),
+    #    the long-lived server keeps an inherited copy of the CALLER's
+    #    own output pipe open forever, so the caller hangs waiting for
+    #    end-of-pipe that never comes. Redirecting 2 streams hung a real
+    #    build; so did redirecting all 3. Redirecting NONE avoids this.
     #
-    # The one combination that is actually safe is redirecting NOTHING:
-    # with no redirection requested, .NET does not force handle
-    # inheritance. The trade-off is that waitress's own request/error
-    # logging is no longer captured to app.out.log/app.err.log; the
-    # health/readiness check, smoke tests, and Prometheus /metrics scrape
-    # are the primary evidence for this project instead (see README
-    # troubleshooting section for how to debug a failed readiness check
-    # without those log files).
-    # Jenkins' ProcessTreeKiller kills every descendant process left over
-    # once a build finishes, on the assumption that nothing a build
-    # starts should outlive it -- which is exactly wrong for Deploy and
-    # Release, whose whole point is to leave a running server behind.
-    # Measured directly: the deployed process was gone within ~17s of
-    # "Finished: SUCCESS". Setting BUILD_ID=dontKillMe on the child's
-    # environment before launch is Jenkins' own documented exemption
-    # flag for precisely this case.
-    $previousBuildId = $env:BUILD_ID
-    $env:BUILD_ID = "dontKillMe"
-    try {
-        $proc = Start-Process -FilePath $waitress -ArgumentList $arguments `
-            -WorkingDirectory $versionDir -PassThru -WindowStyle Hidden
-    } finally {
-        $env:BUILD_ID = $previousBuildId
+    # 2) Separately, Jenkins kills every process left over once a build
+    #    finishes (measured: gone ~17-30s after "Finished: SUCCESS"),
+    #    which defeats the entire point of Deploy/Release. This is NOT
+    #    the classic env-var-based ProcessTreeKiller -- setting
+    #    BUILD_ID=dontKillMe on the child (Jenkins' own documented
+    #    exemption for that mechanism) was tried and made no difference,
+    #    so this Jenkins/durable-task combination is using a Windows Job
+    #    Object instead: it kills every process still assigned to the
+    #    job when the job handle closes, regardless of environment
+    #    variables. A process Start-Process creates stays in that job.
+    #
+    # Win32_Process.Create goes through the WMI provider host
+    # (WmiPrvSE.exe), a completely separate process tree with no job or
+    # handle relationship to this script or to Jenkins, so it dodges
+    # both problems at once -- but only when called directly on the exe,
+    # with no redirection and no cmd.exe wrapper (a cmd.exe shim used
+    # earlier, purely to get file redirection, reintroduced a hang of
+    # its own outside any console session). The trade-off, same as
+    # before: waitress's own request/error logging is not captured to a
+    # file. The health/readiness check, smoke tests, and Prometheus
+    # /metrics scrape are the primary evidence for this project instead
+    # (see README troubleshooting section for how to run the app in a
+    # foreground terminal for ad-hoc debugging).
+    $quotedArgs = ($arguments | ForEach-Object { if ($_ -match '\s') { '"' + $_ + '"' } else { $_ } }) -join ' '
+    $commandLine = '"{0}" {1}' -f $waitress, $quotedArgs
+
+    # Win32_Process.Create does NOT inherit this script's $env: variables
+    # the way Start-Process does -- the app must be told its environment
+    # explicitly via ProcessStartupInformation, or it starts with an
+    # empty/default environment (wrong port, wrong DB path, etc).
+    [string[]]$envVars = @(
+        "APP_ENV=$($env:APP_ENV)",
+        "PORT=$($env:PORT)",
+        "DB_PATH=$($env:DB_PATH)",
+        "APP_VERSION=$($env:APP_VERSION)",
+        "GIT_COMMIT=$($env:GIT_COMMIT)",
+        "PATH=$($env:PATH)",
+        "SystemRoot=$($env:SystemRoot)"
+    )
+    $startupInfo = New-CimInstance -ClassName Win32_ProcessStartup -Namespace "root/cimv2" -ClientOnly -Property @{
+        EnvironmentVariables = $envVars
+        ShowWindow           = [uint16]0
     }
-    $newPid = $proc.Id
+    $result = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{
+        CommandLine            = $commandLine
+        CurrentDirectory       = $versionDir
+        ProcessStartupInformation = $startupInfo
+    }
+    if ($result.ReturnValue -ne 0) {
+        throw "Failed to start $Environment process via WMI (Win32_Process.Create returned $($result.ReturnValue))"
+    }
+    $newPid = $result.ProcessId
     Set-Content -Path $pidFile -Value $newPid -Encoding ascii
 
     # --- readiness check: poll /health until it reports ok ---
