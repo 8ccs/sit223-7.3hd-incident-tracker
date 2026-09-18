@@ -79,6 +79,13 @@ Write-Host $result
 
 # Plain-text companions so the Jenkinsfile can read values with a simple
 # readFile() step, with no JSON-parsing plugin dependency.
-Set-Content -Path (Join-Path $OutputDir "artifact-name.txt") -Value $zipName -Encoding utf8 -NoNewline
-Set-Content -Path (Join-Path $OutputDir "artifact-path.txt") -Value (Resolve-Path $zipPath).Path -Encoding utf8 -NoNewline
-Set-Content -Path (Join-Path $OutputDir "full-version.txt") -Value $fullVersion -Encoding utf8 -NoNewline
+# IMPORTANT: "-Encoding utf8" in Windows PowerShell 5.1 writes a UTF-8
+# byte-order mark. Jenkins' readFile().trim() does NOT strip a BOM (Java's
+# String.trim() does not treat U+FEFF as whitespace), so env.ARTIFACT_ZIP_PATH
+# would silently gain an invisible leading character and Test-Path would
+# then fail to find a file that visibly "looks" like it exists. ASCII
+# encoding never adds a BOM, and every value written here (paths, commit
+# hashes, version numbers) is always plain ASCII, so it is a safe fix.
+Set-Content -Path (Join-Path $OutputDir "artifact-name.txt") -Value $zipName -Encoding ascii -NoNewline
+Set-Content -Path (Join-Path $OutputDir "artifact-path.txt") -Value (Resolve-Path $zipPath).Path -Encoding ascii -NoNewline
+Set-Content -Path (Join-Path $OutputDir "full-version.txt") -Value $fullVersion -Encoding ascii -NoNewline

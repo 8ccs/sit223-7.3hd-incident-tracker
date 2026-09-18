@@ -82,9 +82,13 @@ pipeline {
                     & .\\scripts\\package_artifact.ps1 -Version $env:APP_BASE_VERSION -GitCommit $env:GIT_COMMIT_SHORT -BuildNumber $env:BUILD_NUMBER
                 '''
                 script {
-                    env.ARTIFACT_ZIP_NAME = readFile('dist/artifact-name.txt').trim()
-                    env.ARTIFACT_ZIP_PATH = readFile('dist/artifact-path.txt').trim()
-                    env.FULL_VERSION      = readFile('dist/full-version.txt').trim()
+                    // .trim() alone does not strip a UTF-8 BOM (U+FEFF is
+                    // not whitespace to Java/Groovy), so strip it
+                    // explicitly as a second line of defence on top of
+                    // package_artifact.ps1 writing plain ASCII.
+                    env.ARTIFACT_ZIP_NAME = readFile('dist/artifact-name.txt').trim().replace('﻿', '')
+                    env.ARTIFACT_ZIP_PATH = readFile('dist/artifact-path.txt').trim().replace('﻿', '')
+                    env.FULL_VERSION      = readFile('dist/full-version.txt').trim().replace('﻿', '')
                 }
                 echo "Built artifact ${env.ARTIFACT_ZIP_NAME} -> version ${env.FULL_VERSION}"
                 archiveArtifacts artifacts: 'dist/*.zip, dist/*.json, dist/*.txt', fingerprint: true
