@@ -131,42 +131,42 @@ ALERT_WEBHOOK_URL=$AlertWebhookUrl
     $env:APP_VERSION = $manifest.full_version
     $env:GIT_COMMIT = $manifest.git_commit
 
-    $stdout = Join-Path $logsDir "app.out.log"
-    $stderr = Join-Path $logsDir "app.err.log"
     $waitress = Join-Path $venvDir "Scripts\waitress-serve.exe"
     # Bound to localhost only: Jenkins, Prometheus, and the browser all run
     # on this same machine for the local demo, so there is no need to
     # expose the app on every network interface (see app/app.py B104 note).
     $arguments = @("--listen=127.0.0.1:$port", "--call", "app.app:create_app")
 
-    # All three standard streams are explicitly redirected to files (stdin
-    # from a permanent empty file -- Start-Process requires an existing
-    # file on a filesystem provider, so the "\\.\NUL" device path is
-    # rejected). Without this, the new process can inherit the CALLER's
-    # own stdout/stderr handles on Windows -- when the caller is itself a
-    # piped process (a Jenkins pipeline step, or Python's subprocess.run
-    # with captured output), that caller then waits forever for
-    # end-of-pipe, which never comes because this long-lived detached
-    # server keeps its inherited copy of the handle open. This hung both
-    # an earlier Jenkins build and scripts/verify_alert_path.py before
-    # the redirection was added here and (for the Python side) in that
-    # script.
-    $emptyStdin = Join-Path $Root "empty.stdin"
-    if (-not (Test-Path $emptyStdin)) {
-        New-Item -ItemType Directory -Path $Root -Force | Out-Null
-        New-Item -ItemType File -Path $emptyStdin -Force | Out-Null
-    }
-
-    Push-Location $versionDir
-    try {
-        $proc = Start-Process -FilePath $waitress -ArgumentList $arguments `
-            -WorkingDirectory $versionDir -PassThru -WindowStyle Hidden `
-            -RedirectStandardOutput $stdout -RedirectStandardError $stderr `
-            -RedirectStandardInput $emptyStdin
-        Set-Content -Path $pidFile -Value $proc.Id -Encoding ascii
-    } finally {
-        Pop-Location
-    }
+    # Started with NO stream redirection at all -- deliberately.
+    #
+    # .NET's Process.Start only sets bInheritHandles=TRUE on Windows when
+    # at least one standard stream is redirected; that inherits EVERY
+    # currently-inheritable handle open in the calling process, not just
+    # the redirected ones. When the caller is itself a piped/captured
+    # process (a Jenkins pipeline step, or Python's subprocess.run with
+    # captured output), the long-lived server we start here keeps an
+    # inherited copy of the CALLER's own output pipe open forever, so the
+    # caller waits forever for end-of-pipe that will never come. This is
+    # not hypothetical: it hung a real Jenkins build twice, first with
+    # 2 streams redirected, then again with all 3 (stdin included) --
+    # partial or full redirection both trigger the same inheritance
+    # behaviour. A WMI Win32_Process.Create launch was also tried, to
+    # sidestep .NET entirely, but hung too (a cmd.exe redirection shim
+    # was needed for file-based logging and that shim itself did not
+    # behave reliably when launched outside any console session).
+    #
+    # The one combination that is actually safe is redirecting NOTHING:
+    # with no redirection requested, .NET does not force handle
+    # inheritance. The trade-off is that waitress's own request/error
+    # logging is no longer captured to app.out.log/app.err.log; the
+    # health/readiness check, smoke tests, and Prometheus /metrics scrape
+    # are the primary evidence for this project instead (see README
+    # troubleshooting section for how to debug a failed readiness check
+    # without those log files).
+    $proc = Start-Process -FilePath $waitress -ArgumentList $arguments `
+        -WorkingDirectory $versionDir -PassThru -WindowStyle Hidden
+    $newPid = $proc.Id
+    Set-Content -Path $pidFile -Value $newPid -Encoding ascii
 
     # --- readiness check: poll /health until it reports ok ---
     $healthUrl = "http://localhost:$port/health"
@@ -179,9 +179,9 @@ ALERT_WEBHOOK_URL=$AlertWebhookUrl
         } catch { }
     }
     if (-not $ready) {
-        throw "Deployment to $Environment failed readiness check at $healthUrl after 30s. See $stderr"
+        throw "Deployment to $Environment failed readiness check at $healthUrl after 30s (pid $newPid). Check whether the process is still running (Get-Process -Id $newPid) and whether anything else is bound to port $port."
     }
-    Write-Host "$Environment is ready: $healthUrl -> ok (pid $($proc.Id), version $($manifest.full_version))"
+    Write-Host "$Environment is ready: $healthUrl -> ok (pid $newPid, version $($manifest.full_version))"
 } finally {
     Remove-Item $lockFile -Force -ErrorAction SilentlyContinue
 }
