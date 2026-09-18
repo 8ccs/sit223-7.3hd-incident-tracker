@@ -26,6 +26,8 @@ from pathlib import Path
 
 import requests
 
+PS1_LOG_DIR = Path("reports/monitoring/ps1-logs")
+
 PROM_URL = "http://localhost:9090"
 ALERTMANAGER_URL = "http://localhost:9093"
 INBOX_URL = "http://localhost:9099"
@@ -46,16 +48,50 @@ def now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def run_ps1(name: str) -> None:
+def run_ps1(name: str, timeout_s: int = 90) -> None:
+    """Run a PowerShell script and wait for it to finish.
+
+    Output is redirected to FILES rather than captured with pipes,
+    because deploy.ps1 launches a detached waitress process with
+    Start-Process; on Windows that grandchild can inherit and hold open
+    the parent's stdout/stderr PIPE handles even after the parent script
+    exits, which makes subprocess.run(capture_output=True) hang forever
+    waiting for end-of-pipe that never comes.
+
+    The same inheritance means the detached waitress process can also
+    keep a lock on the log FILE itself after deploy.ps1 exits, so reading
+    it back for the console is best-effort and never fatal -- only the
+    process exit code decides pass/fail. ``timeout_s`` is a second line
+    of defence in case anything else hangs.
+    """
     script = SCRIPTS_DIR / name
-    result = subprocess.run(
-        ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script)],
-        capture_output=True,
-        text=True,
-    )
-    print(result.stdout)
+    PS1_LOG_DIR.mkdir(parents=True, exist_ok=True)
+    out_path = PS1_LOG_DIR / f"{name}.stdout.log"
+    err_path = PS1_LOG_DIR / f"{name}.stderr.log"
+    with out_path.open("w") as out_f, err_path.open("w") as err_f:
+        try:
+            result = subprocess.run(
+                ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script)],
+                stdout=out_f,
+                stderr=err_f,
+                timeout=timeout_s,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise RuntimeError(
+                f"{name} did not finish within {timeout_s}s (still running detached "
+                "processes it started, e.g. waitress, are not affected by this timeout)"
+            ) from exc
+
+    try:
+        print(out_path.read_text(errors="replace"))
+    except OSError as exc:
+        print(f"(could not read {out_path} for console echo: {exc})")
+
     if result.returncode != 0:
-        print(result.stderr, file=sys.stderr)
+        try:
+            print(err_path.read_text(errors="replace"), file=sys.stderr)
+        except OSError as exc:
+            print(f"(could not read {err_path} for console echo: {exc})", file=sys.stderr)
         raise RuntimeError(f"{name} failed with exit code {result.returncode}")
 
 
